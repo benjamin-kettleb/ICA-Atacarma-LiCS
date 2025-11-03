@@ -10,6 +10,10 @@ from sklearn.decomposition import FastICA, PCA
 import os
 from scipy.stats import spearmanr
 from cmcrameri import cm
+import multiprocessing as multi
+import warnings
+import copy
+
 
 def get_roma():
     return cm.roma.reversed()
@@ -128,7 +132,7 @@ class ICA_area:
         self.x_range=x_range
         self.y_range=y_range
         self.volcano_name=volcano_name
-        self.n_images=h5_object.n_im
+        
 
         self.x=h5_object.x
         self.x_dates=h5_object.x_dates
@@ -145,6 +149,8 @@ class ICA_area:
         if self.x_range == False or self.y_range == False:
             self.x_range = (0, self.cum.shape[2])
             self.y_range = (0, self.cum.shape[1])
+
+        self.n_images, self.length, self.width = self.cum.shape
         self.flatten()
 
         self.lat1 = h5_object.lat1
@@ -592,6 +598,56 @@ class ICA_area:
         else:
             self.principal_component_labels = component_labels
 
+    def deramp_wrapper(self,i):
+        """
+        THIS IS TAKEN FROM LiCSBAS tools_lib.fit2dh WITH MINOR MODIFICATIONS
+        Wrapper function for deramping cumulative interferograms.
+        """
+        cum_org = self.cum[i, :, :]
+
+        if np.mod(i, 10) == 0:
+            print("  {0:3}/{1:3}th image...".format(i, len(self.x_dates)), flush=True)
+
+        fit, model = fit2dh(cum_org, self.deg_ramp, self.hgt_flag,
+                                    self.hgt_min, self.hgt_max) ## fit is not masked
+        _cum = cum_org-fit
+
+        return _cum, model
+
+    def deramp_cum(self,deg_ramp=1, hgt=[], hgt_min=-10000, hgt_max=10000, n_para=1):
+        self.deg_ramp = deg_ramp
+        self.hgt_flag = hgt
+        self.hgt_min = hgt_min
+        self.hgt_max = hgt_max
+
+        cum_deramped = np.zeros((self.n_images, self.length, self.width))
+
+        if n_para == 1:
+            models = np.zeros(self.n_images, dtype=object)
+            for i in range(self.n_images):
+                cum_deramped[i, :, :], models[i] = self.deramp_wrapper(i)
+        else:
+            print('with {} parallel processing...'.format(n_para), flush=True)
+            ### Parallel processing
+            try:
+                p = multi.get_context('fork').Pool(n_para)#Unix-based systems
+            except:
+                p = multi.get_context('spawn').Pool(n_para)
+            _result = np.array(p.map(self.deramp_wrapper, range(self.n_images)), dtype=object)
+            p.close()
+            del args
+
+            models = _result[:, 1]
+            for i in range(self.n_images):
+                cum_deramped[i, :, :] = _result[i, 0]
+            del _result
+
+        self.cum = cum_deramped
+        mask = np.isnan(self.cum_masked[0, :, :]) # assuming the mask is the same for all time steps - quick fix
+        self.cum_masked = self.cum * (~mask)
+
+        self.flatten()
+
 
 class important_dates:
     def __init__(self,date_list, date_meaning, date_color, date_style = "dashed"):
@@ -617,6 +673,8 @@ def plot_regression_and_spearman(ax, x, y):
     ax.text(0.05, 0.95, f"Spearman's ρ: {spearman_corr:.2f}", transform=ax.transAxes, 
             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
 
+#### The Next three function are taken from LiCSBAS
+
 def xy2bl(x, y, lat1, dlat, lon1, dlon):###########ADDED
     """
     xy index starts from 0, end with width/length-1
@@ -636,6 +694,90 @@ def bl2xy(lon, lat, lat1, postlat, lon1, postlon):
     y = int(np.round((lat - lat1)/postlat))
 
     return [x, y]
+
+def fit2dh(A, deg, hgt, hgt_min, hgt_max, gpu=False):
+    """
+    Estimate best fit 2d ramp and topography-correlated component simultaneously.
+
+    Inputs:
+        A   : Input ndarray (can include nan)
+        deg : degree of polynomial for fitting ramp
+          - 1  -> a+bx+cy (ramp, default)
+          - bl -> a+bx+cy+dxy (biliner)
+          - 2  -> a+bx+cy+dxy+ex**2_fy**2 (2d polynomial)
+          - []  -> a (must be used with hgt)
+        hgt : Input hgt to estimate coefficient of topo-corr component
+              If blank, don*t estimate topo-corr component.
+        hgt_min : Minimum hgt to take into account in hgt-linear
+        hgt_max : Maximum hgt to take into account in hgt-linear
+        gpu     : GPU flag
+
+    Returns:
+        Afit : Best fit solution with the same demention as A
+        m    : Set of parameters of best fit plain (a,b,c...)
+
+    Note: GPU option seems slow and may return error when the size is large.
+          Not recommended.
+
+    """
+    if gpu:
+        import cupy as xp
+        A = xp.asarray(A)
+        hgt = xp.asarray(hgt)
+        hgt_min = xp.asarray(hgt_min)
+        hgt_max = xp.asarray(hgt_max)
+    else:
+        xp = np
+
+    ### Make design matrix G
+    length, width = A.shape
+
+    if not deg:
+        G = xp.ones((length*width))
+    else:
+        Xgrid, Ygrid = xp.meshgrid(xp.arange(width), xp.arange(length))
+        Xgrid1 = Xgrid.ravel()
+        Ygrid1 = Ygrid.ravel()
+
+        if str(deg) == "1":
+            G = xp.stack((Xgrid1, Ygrid1)).T
+        elif str(deg) == "bl":
+            G = xp.stack((Xgrid1, Ygrid1, Xgrid1*Ygrid1)).T
+        elif str(deg) == "2":
+            G = xp.stack((Xgrid1, Ygrid1, Xgrid1*Ygrid1,
+                          Xgrid1**2, Ygrid1**2)).T
+        else:
+            print('\nERROR: Not proper deg ({}) is used\n'.format(deg), file=sys.stderr)
+            return False
+        del Xgrid, Ygrid, Xgrid1, Ygrid1
+
+        G = xp.hstack([xp.ones((length*width, 1)), G])
+
+    if len(hgt) > 0:
+        _hgt = hgt.copy()  ## Not to overwrite hgt in main
+        _hgt[xp.isnan(_hgt)] = 0
+        _hgt[_hgt<hgt_min] = 0
+        _hgt[_hgt>hgt_max] = 0
+        G2 = xp.vstack((G.T, hgt.ravel())).T ## for Afit
+        G = xp.vstack((G.T, _hgt.ravel())).T
+        del _hgt
+    else:
+        G2 = G
+
+    G = G.astype(xp.int32)
+
+    ### Invert
+    mask = xp.isnan(A.ravel())
+    m = xp.linalg.lstsq(G[~mask, :], A.ravel()[~mask], rcond=None)[0]
+
+    Afit = ((xp.matmul(G2, m)).reshape((length, width))).astype(xp.float32)
+
+    if gpu:
+        Afit = xp.asnumpy(Afit)
+        m = xp.asnumpy(m)
+        del A, hgt, hgt_min, hgt_max, length, width, G, G2, mask
+
+    return Afit, m
 
 def wrap_disp(disp, wavelength = 56):
     unw_phase = -4*np.pi*disp/wavelength # -2/wavelenght * 2 pi

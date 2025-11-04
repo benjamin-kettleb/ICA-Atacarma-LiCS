@@ -580,7 +580,7 @@ class ICA_area:
                 raise ValueError("Length of independent_component_labels must match number of components.")
             used_labels={}
             for i, label in enumerate(component_labels):
-                if label in component_labels[:i] or label in component_labels[i+1]:
+                if label in component_labels[:i] or label in component_labels[i+1:]:
                     if label in used_labels:
                         used_labels[label].append(i)
                     else:

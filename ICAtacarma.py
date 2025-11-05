@@ -155,8 +155,8 @@ class ICA_area:
             for i, date in reversed(list(enumerate(self.x_dates))):#find index of start
                 if start_date <= date:
                     start_index = i
-            self.cum = self.cum[start_index:]
-            self.cum_masked = self.cum_masked[start_index:]
+            self.cum = self.cum[start_index:] - self.cum[start_index] # need to subtract self.cum[start_index]
+            self.cum_masked = self.cum_masked[start_index:] - self.cum_masked[start_index]
             self.x = self.x[start_index:]# - self.x[start_index]
             self.x_dates = self.x_dates[start_index:]
         #print(self.x_dates)
@@ -282,34 +282,58 @@ class ICA_area:
         component = self.independent_components[component_number][:, np.newaxis, np.newaxis] * weights
         return component
 
-    def perform_ICA(self,n_components,masked=False,clip_range=False,max_iter=2000, tol=0.0001):
+    def perform_ICA(self,n_components,masked=False,clip_range=False,max_iter=2000, tol=0.0001, Temporal = True):
 
         self.n_components=n_components
         self.ica_clip_range=clip_range
         self.ica_masked=masked
         self.ica = FastICA(n_components=self.n_components,max_iter=max_iter,tol=tol)#,whiten=False)
         #self.ica = ica(n_components=self.n_components)
-        if not(self.ica_clip_range):
+        self.Temporal = Temporal
+        if self.Temporal:
+            if not(self.ica_clip_range):
+                if self.ica_masked:
+                    #ica_fit_transform(self.cum_flattened_masked.T,self.ica,n_components_to_keep)  # Transpose for temporal ICA
+                    self.ica.fit_transform(self.cum_flattened_masked.T)
+                    independent_components = self.ica.transform(self.cum_flattened_masked.T).T  # Transpose back
+                else:
+                    #ica_fit_transform(self.cum_flattened.T,self.ica,n_components_to_keep) 
+                    self.ica.fit_transform(self.cum_flattened.T)
+                    independent_components = self.ica.transform(self.cum_flattened.T).T  # Transpose back
+
+            weights = self.ica.mixing_
+
+            for i in range(self.n_components):
+                independent_components[i] = independent_components[i] - independent_components[i][0]
+
+                scale = independent_components[i][-1]
+                independent_components[i] = independent_components[i] / scale
+                weights[:, i] = weights[:, i] * scale
+            
+            self.weights = weights
+            self.independent_components = independent_components
+        else:
             if self.ica_masked:
-                #ica_fit_transform(self.cum_flattened_masked.T,self.ica,n_components_to_keep)  # Transpose for temporal ICA
-                self.ica.fit_transform(self.cum_flattened_masked.T)
-                independent_components = self.ica.transform(self.cum_flattened_masked.T).T  # Transpose back
+                self.ica.fit_transform(self.cum_flattened_masked)
+                spatial_map = self.ica.transform(self.cum_flattened_masked)
             else:
-                #ica_fit_transform(self.cum_flattened.T,self.ica,n_components_to_keep) 
-                self.ica.fit_transform(self.cum_flattened.T)
-                independent_components = self.ica.transform(self.cum_flattened.T).T  # Transpose back
+                self.ica.fit_transform(self.cum_flattened)
+                spatial_map = self.ica.transform(self.cum_flattened)
+            
+            time_courses = self.ica.mixing_.T # transpose to same shape as Termporal
 
-        weights = self.ica.mixing_
+            print(np.shape(time_courses))
+            print(np.shape(spatial_map))
 
-        for i in range(self.n_components):
-            independent_components[i] = independent_components[i] - independent_components[i][0]
+            for i in range(self.n_components):
+                time_courses[i] = time_courses[i] - time_courses[i][0]
 
-            scale = independent_components[i][-1]
-            independent_components[i] = independent_components[i] / scale
-            weights[:, i] = weights[:, i] * scale
-        
-        self.weights = weights
-        self.independent_components = independent_components
+                scale = time_courses[i][-1]
+                time_courses[i] = time_courses[i] / scale
+                spatial_map[:, i] = spatial_map[:, i] * scale
+            self.weights = spatial_map
+            self.independent_components = time_courses
+            
     
     def plot_ICA(self,representative_index="max",cbar_locked = False, date_list = False, wrapped=False):
 

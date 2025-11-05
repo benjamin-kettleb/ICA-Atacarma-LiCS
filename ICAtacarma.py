@@ -128,7 +128,7 @@ import pandas as pd
 
 
 class ICA_area:
-    def __init__(self,h5_object,volcano_name,y_range=False,x_range=False):
+    def __init__(self,h5_object,volcano_name,y_range=False,x_range=False, start_date=False, end_date=False):
         self.x_range=x_range
         self.y_range=y_range
         self.volcano_name=volcano_name
@@ -149,6 +149,27 @@ class ICA_area:
         if self.x_range == False or self.y_range == False:
             self.x_range = (0, self.cum.shape[2])
             self.y_range = (0, self.cum.shape[1])
+
+        if start_date != False:
+            start_index = -1
+            for i, date in reversed(list(enumerate(self.x_dates))):#find index of start
+                if start_date <= date:
+                    start_index = i
+            self.cum = self.cum[start_index:]
+            self.cum_masked = self.cum_masked[start_index:]
+            self.x = self.x[start_index:]# - self.x[start_index]
+            self.x_dates = self.x_dates[start_index:]
+        #print(self.x_dates)
+
+        if end_date != False:
+            end_index = 0
+            for i, date in enumerate(self.x_dates):#find index of end
+                if end_date >= date:
+                    end_index = i+1#??
+            self.cum = self.cum[:end_index]
+            self.cum_masked = self.cum_masked[:end_index]
+            self.x = self.x[:end_index]
+            self.x_dates = self.x_dates[:end_index]
 
         self.n_images, self.length, self.width = self.cum.shape
         self.flatten()
@@ -655,6 +676,79 @@ class important_dates:
         self.date_list = date_list
         self.date_meaning = date_meaning
         self.date_color = date_color
+
+class ICA_area_time_split:
+    def __init__(self, h5_object, volcano_name, y_range=False, x_range=False, Split_length=False, N_splits=False, split_between=False):
+        if Split_length and N_splits:
+            raise ValueError("Only one of Split_length or N_splits should be provided.")
+        if split_between:
+            if len(split_between)==1:
+                raise ValueError("split_between should contain at least two dates.")
+            if (N_splits or Split_length) and len(split_between)>2:
+                raise ValueError("split_between can only be the start and end date when N_splits or Split_length are defined.")
+            
+            if N_splits:
+                start_date = datetime.strptime(split_between[0], "%Y%m%d")
+                end_date = datetime.strptime(split_between[1], "%Y%m%d")
+                total_days = (end_date - start_date).days
+                Split_length = total_days // N_splits
+            elif Split_length:
+                start_date = datetime.strptime(split_between[0], "%Y%m%d")
+                end_date = datetime.strptime(split_between[1], "%Y%m%d")
+                total_days = (end_date - start_date).days
+                N_splits = total_days // Split_length
+        else:
+            split_between = []
+            if N_splits:
+                start_date = h5_object.x_dates[0]
+                end_date = h5_object.x_dates[-1]
+                total_days = (end_date - start_date).days
+                Split_length = total_days // N_splits
+            elif Split_length:
+                start_date = h5_object.x_dates[0]
+                end_date = h5_object.x_dates[-1]
+                total_days = (end_date - start_date).days
+                N_splits = total_days // Split_length
+
+        if len(split_between) > 2:
+            split_dates = [datetime.strptime(date, "%Y%m%d") for date in split_between]
+        else:
+            split_dates = [start_date + timedelta(days=i*Split_length) for i in range(N_splits+1)]
+            #if split_dates[-1] < end_date:
+            #    split_dates.append(end_date)
+
+        self.split_dates = split_dates
+        self.volcano_name = volcano_name
+        self.time_splits = []
+        self.h5_x_dates = h5_object.x_dates
+        self.h5_x = h5_object.x
+        self.h5_object = h5_object
+        self.y_range = y_range
+        self.x_range = x_range
+
+        self.peg_splits_to_dates()
+
+    def peg_splits_to_dates(self):
+        for i in range(len(self.split_dates)-1):
+            start_date = self.split_dates[i]
+            end_date = self.split_dates[i+1]
+
+            start_index = peg_to_nearest_date(self.h5_x_dates, start_date)
+            end_index = peg_to_nearest_date(self.h5_x_dates, end_date)
+
+            start_h5_date = self.h5_x_dates[start_index]
+            end_h5_date = self.h5_x_dates[end_index]
+
+            print(f"Creating ICA area for time split {start_h5_date} to {end_h5_date}")
+
+            split_area = ICA_area(self.h5_object, self.volcano_name, self.y_range, self.x_range, start_h5_date, end_h5_date)
+
+            self.time_splits.append(split_area)
+
+def peg_to_nearest_date(date_list, target_date):
+    date_differences = [abs(date - target_date).days for date in date_list]
+    nearest_index = date_differences.index(min(date_differences))
+    return nearest_index        
         
 def plot_regression_and_spearman(ax, x, y):
     x = np.array(x)
